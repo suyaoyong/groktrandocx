@@ -9,7 +9,7 @@ setup(
         'python-docx>=0.8.11',
     ],
     author="Suyao Yong",
-    author_email="your.email@example.com",
+    author_email="suhunter@163.com",
     description="A multi-language document translator using Grok API",
     long_description=open('README.md').read(),
     long_description_content_type="text/markdown",
