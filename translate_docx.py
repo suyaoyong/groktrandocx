@@ -10,6 +10,74 @@ from dotenv import load_dotenv
 # 加载环境变量
 load_dotenv()
 
+class DocumentProcessor:
+    def __init__(self, translator):
+        self.translator = translator
+        self.processed_elements = 0
+        self.total_elements = 0
+
+    def count_translatable_elements(self, doc):
+        """计算文档中可翻译元素的总数"""
+        count = 0
+        # 计算段落数
+        count += len(doc.paragraphs)
+        # 计算表格中的单元格数
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    count += len(cell.paragraphs)
+        # 计算文本框数（如果存在）
+        for shape in doc.inline_shapes:
+            if hasattr(shape, 'text_frame'):
+                count += 1
+        return count
+
+    def translate_table(self, source_table, new_doc, target_language, preserve_format=True):
+        """翻译表格内容"""
+        # 创建新表格
+        new_table = new_doc.add_table(rows=len(source_table.rows), cols=len(source_table.columns))
+        if preserve_format:
+            try:
+                new_table.style = source_table.style
+            except:
+                pass
+
+        # 复制并翻译单元格内容
+        for i, row in enumerate(source_table.rows):
+            for j, cell in enumerate(row.cells):
+                # 获取源单元格的文本
+                source_text = cell.text.strip()
+                if source_text:
+                    # 翻译文本
+                    translated_text = self.translator.translate_text(
+                        source_text,
+                        target_language
+                    )
+                    if translated_text:
+                        # 将翻译后的文本写入新表格对应的单元格
+                        new_table.cell(i, j).text = translated_text
+                    else:
+                        new_table.cell(i, j).text = source_text
+                    self.processed_elements += 1
+
+    def translate_text_frame(self, source_shape, new_doc, target_language):
+        """翻译文本框内容"""
+        try:
+            if hasattr(source_shape, 'text_frame'):
+                text = source_shape.text_frame.text.strip()
+                if text:
+                    # 翻译文本
+                    translated_text = self.translator.translate_text(
+                        text,
+                        target_language
+                    )
+                    if translated_text:
+                        # 在新文档中添加翻译后的文本
+                        new_para = new_doc.add_paragraph(translated_text)
+                        self.processed_elements += 1
+        except Exception as e:
+            print(f"处理文本框时出错: {str(e)}")
+
 class DocTranslator:
     def __init__(self):
         # 从环境变量获取 API key
@@ -190,7 +258,7 @@ class TranslatorGUI:
         self.cache_label.pack(side=tk.LEFT, padx=5)
         
         # 添加说明文本
-        help_text = "支持的语言���简体中文、繁體中文、日本語、English、Español、Français、Deutsch、한국어、Русский、Italiano"
+        help_text = "支持的语言简体中文、繁體中文、日本語、English、Español、Français、Deutsch、한국어、Русский、Italiano"
         help_label = ttk.Label(main_frame, text=help_text, wraplength=500, foreground="gray")
         help_label.pack(pady=10)
 
@@ -254,7 +322,7 @@ class TranslatorGUI:
         if not hasattr(self, 'file_path'):
             messagebox.showerror("错误", "请先选择文件")
             return
-            
+        
         try:
             # 重置计时器和进度
             self.translation_start_time = time.time()
@@ -265,6 +333,9 @@ class TranslatorGUI:
             
             # 获取选择的目标语言
             target_language = self.translator.supported_languages[self.target_language.get()]
+            
+            # 创建文档处理器
+            doc_processor = DocumentProcessor(self.translator)
             
             # 创建缓存文件路径
             cache_dir = os.path.join(os.path.dirname(self.file_path), ".translation_cache")
@@ -285,6 +356,11 @@ class TranslatorGUI:
             doc = Document(self.file_path)
             new_doc = None
             
+            # 计算总元素数
+            total_elements = doc_processor.count_translatable_elements(doc)
+            doc_processor.total_elements = total_elements
+            self.progress['maximum'] = total_elements
+            
             if os.path.exists(cache_file) and os.path.exists(progress_file):
                 with open(progress_file, 'r') as f:
                     last_index = int(f.read().strip() or '0')
@@ -292,7 +368,7 @@ class TranslatorGUI:
                 if last_index > 0:
                     response = messagebox.askyesno(
                         "发现未完成的翻译",
-                        f"发现上次翻译到第 {last_index} 段，是否继续上次的翻译？"
+                        f"发现上次翻译到第 {last_index} 个元素，是否继续上次的翻译？"
                     )
                     if response:
                         new_doc = Document(cache_file)
@@ -302,23 +378,15 @@ class TranslatorGUI:
             if new_doc is None:
                 new_doc = Document()
                 
-            total_paragraphs = len(doc.paragraphs)
-            self.progress['maximum'] = total_paragraphs
-            
-            # 从上次的位置继续翻译
-            for i, para in enumerate(doc.paragraphs[last_index:], start=last_index):
-                while self.is_paused:
-                    self.window.update()
-                    time.sleep(0.1)
-                    continue
-                    
-                try:
-                    self.processed_paragraphs = i + 1
-                    self.update_progress_info(i + 1, total_paragraphs)
-                    self.status_label.config(text=f"正在翻译第 {i+1}/{total_paragraphs} 段...")
-                    self.progress['value'] = i + 1
-                    self.window.update()
-                    
+            # 翻译文档内容
+            try:
+                # 翻译段落
+                for i, para in enumerate(doc.paragraphs[last_index:], start=last_index):
+                    while self.is_paused:
+                        self.window.update()
+                        time.sleep(0.1)
+                        continue
+                        
                     if para.text.strip():
                         new_para = new_doc.add_paragraph()
                         if self.preserve_format.get():
@@ -332,43 +400,49 @@ class TranslatorGUI:
                             new_para.text = translated_text
                         else:
                             new_para.text = para.text
+                        
+                        doc_processor.processed_elements += 1
                     else:
                         new_doc.add_paragraph()
                     
-                    # 每翻译完一段就保存进度
-                    new_doc.save(cache_file)
-                    with open(progress_file, 'w') as f:
-                        f.write(str(i + 1))
+                    self.update_progress(doc_processor.processed_elements, total_elements)
                     
-                    time.sleep(0.5)
-                    
-                    # 更新缓存状态
-                    self.update_cache_status()
-                    
-                except Exception as para_error:
-                    print(f"翻译段落 {i+1} 时出错: {str(para_error)}")
-                    # 保存当前进度并提示用户
-                    new_doc.save(cache_file)
-                    messagebox.showwarning(
-                        "警告",
-                        f"翻译第 {i+1} 段时出现错误，已保存进度。\n您可以稍后继续翻译。"
+                # 翻译表格
+                for table in doc.tables:
+                    doc_processor.translate_table(
+                        table, 
+                        new_doc, 
+                        target_language, 
+                        self.preserve_format.get()
                     )
-                    return
-            
-            # 翻译完成，保存最终文档
-            output_path = os.path.splitext(self.file_path)[0] + f"_translated_{target_language}.docx"
-            new_doc.save(output_path)
-            
-            # 清理缓存文件
-            try:
-                os.remove(cache_file)
-                os.remove(progress_file)
-            except:
-                pass
-            
-            self.status_label.config(text="翻译完成！")
-            messagebox.showinfo("成功", f"翻译已完成！\n保存至: {output_path}")
-            
+                    self.update_progress(doc_processor.processed_elements, total_elements)
+                
+                # 翻译文本框
+                for shape in doc.inline_shapes:
+                    doc_processor.translate_text_frame(
+                        shape,
+                        new_doc,
+                        target_language
+                    )
+                    self.update_progress(doc_processor.processed_elements, total_elements)
+                
+                # 保存文档
+                output_path = os.path.splitext(self.file_path)[0] + f"_translated_{target_language}.docx"
+                new_doc.save(output_path)
+                
+                # 清理缓存文件
+                self.clean_cache()
+                
+                self.status_label.config(text="翻译完成！")
+                messagebox.showinfo("成功", f"翻译已完成！\n保存至: {output_path}")
+                
+            except Exception as e:
+                # 保存当前进度
+                new_doc.save(cache_file)
+                with open(progress_file, 'w') as f:
+                    f.write(str(doc_processor.processed_elements))
+                raise e
+                
         except Exception as e:
             messagebox.showerror("错误", f"翻译过程中出错：{str(e)}")
             self.status_label.config(text="翻译失败")
@@ -390,7 +464,7 @@ class TranslatorGUI:
             self.translate_button.config(state=tk.NORMAL)
 
     def diagnose_document(self, doc_path):
-        """诊断文档问题"""
+        """断文档问题"""
         try:
             # 检查文件大小
             file_size = os.path.getsize(doc_path)
@@ -450,6 +524,33 @@ class TranslatorGUI:
                 os.rmdir(cache_dir)
         except:
             pass
+
+    def update_progress(self, current, total):
+        """更新进度信息"""
+        self.progress['value'] = current
+        self.progress_label.config(text=f"进度: {current}/{total}")
+        self.status_label.config(text=f"正在翻译第 {current}/{total} 个元素...")
+        self.window.update()
+        
+        if self.translation_start_time and current > 0:
+            elapsed_time = time.time() - self.translation_start_time
+            avg_time_per_element = elapsed_time / current
+            remaining_elements = total - current
+            estimated_remaining_time = avg_time_per_element * remaining_elements
+            
+            # 转换为时分秒格式
+            hours = int(estimated_remaining_time // 3600)
+            minutes = int((estimated_remaining_time % 3600) // 60)
+            seconds = int(estimated_remaining_time % 60)
+            
+            if hours > 0:
+                time_str = f"{hours}小时{minutes}分钟"
+            elif minutes > 0:
+                time_str = f"{minutes}分钟{seconds}秒"
+            else:
+                time_str = f"{seconds}秒"
+                
+            self.time_label.config(text=f"预计剩余时间: {time_str}")
 
 def main():
     app = TranslatorGUI()
