@@ -26,18 +26,10 @@ class DocumentProcessor:
             for row in table.rows:
                 for cell in row.cells:
                     count += len(cell.paragraphs)
-        # 计算页眉页脚数
-        for section in doc.sections:
-            # 计算页眉段落
-            if section.header.paragraphs:
-                for para in section.header.paragraphs:
-                    if para.text.strip():
-                        count += 1
-            # 计算页脚段落
-            if section.footer.paragraphs:
-                for para in section.footer.paragraphs:
-                    if para.text.strip():
-                        count += 1
+        # 计算文本框数（如果存在）
+        for shape in doc.inline_shapes:
+            if hasattr(shape, 'text_frame'):
+                count += 1
         return count
 
     def translate_table(self, source_table, new_doc, target_language, preserve_format=True):
@@ -80,56 +72,11 @@ class DocumentProcessor:
                         target_language
                     )
                     if translated_text:
-                        # 添加一个分隔线表示这是文本框内容
-                        new_doc.add_paragraph('─' * 50)
-                        # 添加文本框标识
-                        new_doc.add_paragraph('【文本框内容】').bold = True
-                        # 添加翻译后的文本
+                        # 在新文档中添加翻译后的文本
                         new_para = new_doc.add_paragraph(translated_text)
-                        # 添加结束分隔线
-                        new_doc.add_paragraph('─' * 50)
-                        new_doc.add_paragraph()  # 添加空行
                         self.processed_elements += 1
-                        return True
         except Exception as e:
             print(f"处理文本框时出错: {str(e)}")
-        return False
-
-    def translate_section(self, section, new_section, target_language):
-        """翻译页眉页脚"""
-        try:
-            # 翻译页眉
-            if section.header.paragraphs:
-                for para in section.header.paragraphs:
-                    if para.text.strip():
-                        translated_text = self.translator.translate_text(
-                            para.text,
-                            target_language
-                        )
-                        if translated_text:
-                            # 确保新文档的页眉有足够的段落
-                            while len(new_section.header.paragraphs) <= 0:
-                                new_section.header.add_paragraph()
-                            new_section.header.paragraphs[0].text = translated_text
-                            self.processed_elements += 1
-
-            # 翻译页脚
-            if section.footer.paragraphs:
-                for para in section.footer.paragraphs:
-                    if para.text.strip():
-                        translated_text = self.translator.translate_text(
-                            para.text,
-                            target_language
-                        )
-                        if translated_text:
-                            # 确保新文档的页脚有足够的段落
-                            while len(new_section.footer.paragraphs) <= 0:
-                                new_section.footer.add_paragraph()
-                            new_section.footer.paragraphs[0].text = translated_text
-                            self.processed_elements += 1
-
-        except Exception as e:
-            print(f"处理页眉页脚时出错: {str(e)}")
 
 class DocTranslator:
     def __init__(self):
@@ -371,26 +318,6 @@ class TranslatorGUI:
             self.update_cache_status()
             messagebox.showinfo("成功", "缓存已清理")
 
-    def get_unique_filename(self, base_path, target_language):
-        """获取唯一的文件名"""
-        dir_path = os.path.dirname(base_path)
-        file_name = os.path.basename(base_path)
-        name, ext = os.path.splitext(file_name)
-        
-        # 基础输出文件名
-        base_output = os.path.join(dir_path, f"{name}_translated_{target_language}")
-        
-        # 如果文件不存在，直接返回基础名称
-        if not os.path.exists(f"{base_output}{ext}"):
-            return f"{base_output}{ext}"
-        
-        # 如果文件存在，添加序号
-        counter = 1
-        while os.path.exists(f"{base_output}_{counter}{ext}"):
-            counter += 1
-        
-        return f"{base_output}_{counter}{ext}"
-
     def start_translation(self):
         if not hasattr(self, 'file_path'):
             messagebox.showerror("错误", "请先选择文件")
@@ -491,30 +418,16 @@ class TranslatorGUI:
                     self.update_progress(doc_processor.processed_elements, total_elements)
                 
                 # 翻译文本框
-                text_frame_count = 0
                 for shape in doc.inline_shapes:
-                    if doc_processor.translate_text_frame(
+                    doc_processor.translate_text_frame(
                         shape,
                         new_doc,
-                        target_language
-                    ):
-                        text_frame_count += 1
-                        self.update_progress(doc_processor.processed_elements, total_elements)
-                
-                if text_frame_count > 0:
-                    self.status_label.config(text=f"已翻译 {text_frame_count} 个文本框")
-                
-                # 翻译页眉页脚
-                for section in doc.sections:
-                    doc_processor.translate_section(
-                        section,
-                        new_doc.sections[0],  # 假设新文档只有一个section
                         target_language
                     )
                     self.update_progress(doc_processor.processed_elements, total_elements)
                 
-                # 保存文档（使用新的文件名生成方法）
-                output_path = self.get_unique_filename(self.file_path, target_language)
+                # 保存文档
+                output_path = os.path.splitext(self.file_path)[0] + f"_translated_{target_language}.docx"
                 new_doc.save(output_path)
                 
                 # 清理缓存文件
@@ -599,7 +512,7 @@ class TranslatorGUI:
         self.window.mainloop()
 
     def clean_cache(self):
-        """��理所有缓存文件"""
+        """清理所有缓存文件"""
         try:
             cache_dir = os.path.join(os.path.dirname(self.file_path), ".translation_cache")
             if os.path.exists(cache_dir):
