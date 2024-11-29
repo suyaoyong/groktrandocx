@@ -6,6 +6,7 @@ from tkinter import filedialog, messagebox, ttk
 from tkinter.ttk import Progressbar
 import time
 from dotenv import load_dotenv
+from docx.oxml import parse_xml
 
 # 加载环境变量
 load_dotenv()
@@ -15,58 +16,210 @@ class DocumentProcessor:
         self.translator = translator
         self.processed_elements = 0
         self.total_elements = 0
+        self.text_buffer = []  # 添加文本缓冲区
+        self.buffer_limit = 1000  # 设置缓冲区字符限制
+        self.min_chars = 300  # 增加到300个字符
 
     def count_translatable_elements(self, doc):
         """计算文档中可翻译元素的总数"""
         count = 0
         # 计算段落数
-        count += len(doc.paragraphs)
+        for para in doc.paragraphs:
+            if para.text.strip():  # 只计算非空段落
+                count += 1
+                
         # 计算表格中的单元格数
         for table in doc.tables:
             for row in table.rows:
                 for cell in row.cells:
-                    count += len(cell.paragraphs)
+                    if cell.text.strip():  # 只计算非空单元格
+                        count += 1
+                        
+        # 计算文本框数
+        for shape in doc.inline_shapes:
+            if hasattr(shape, 'text_frame') and shape.text_frame.text.strip():
+                count += 1
+                
         # 计算页眉页脚数
         for section in doc.sections:
             # 计算页眉段落
-            if section.header.paragraphs:
+            if section.header:
                 for para in section.header.paragraphs:
                     if para.text.strip():
                         count += 1
             # 计算页脚段落
-            if section.footer.paragraphs:
+            if section.footer:
                 for para in section.footer.paragraphs:
                     if para.text.strip():
                         count += 1
+                        
         return count
+
+    def flush_buffer(self, target_language):
+        """翻译并清空缓冲区"""
+        if not self.text_buffer:
+            return {}
+            
+        # 将缓冲区文本合并，用特殊标记分隔
+        combined_text = "\n---SPLIT---\n".join(text for text, _ in self.text_buffer)
+        translated_text = self.translator.translate_text(combined_text, target_language)
+        
+        if translated_text:
+            # 分割翻译结果
+            translations = translated_text.split("\n---SPLIT---\n")
+            # 创建原文到译文的映射
+            translation_map = {}
+            for (original, _), translation in zip(self.text_buffer, translations):
+                translation_map[original] = translation.strip()
+        else:
+            translation_map = {text: text for text, _ in self.text_buffer}
+            
+        self.text_buffer.clear()
+        return translation_map
+
+    def add_to_buffer(self, text, context):
+        """添加文本到缓冲区"""
+        if text.strip():
+            self.text_buffer.append((text, context))
+        
+        # 如果缓冲区文本总长度超过限制，则执行翻译
+        if sum(len(text) for text, _ in self.text_buffer) >= self.buffer_limit:
+            return True
+        return False
+
+    def translate_paragraphs(self, paragraphs, new_doc, target_language, preserve_format=True, start_index=0):
+        """批量翻译段落"""
+        translation_map = {}
+        
+        for i, para in enumerate(paragraphs[start_index:], start=start_index):
+            text = para.text.strip()
+            if not text:
+                new_doc.add_paragraph()
+                continue
+                
+            # 如果文本长度小于阈值且不是最后一个段落，尝试合并
+            if len(text) < self.min_chars and i < len(paragraphs) - 1:
+                should_translate = self.add_to_buffer(text, para)
+            else:
+                # 如果文本较长，直接添加并触发翻译
+                should_translate = self.add_to_buffer(text, para)
+                
+            if should_translate:
+                translation_map.update(self.flush_buffer(target_language))
+                
+            # 如果当前段落的翻译已经完成
+            if text in translation_map:
+                new_para = new_doc.add_paragraph()
+                if preserve_format:
+                    try:
+                        new_para.style = para.style
+                    except:
+                        pass
+                new_para.text = translation_map[text]
+                self.processed_elements += 1
+                
+        # 处理缓冲区中剩余的文本
+        if self.text_buffer:
+            translation_map.update(self.flush_buffer(target_language))
+            for text, para in self.text_buffer:
+                new_para = new_doc.add_paragraph()
+                if preserve_format:
+                    try:
+                        new_para.style = para.style
+                    except:
+                        pass
+                new_para.text = translation_map.get(text, text)
+                self.processed_elements += 1
 
     def translate_table(self, source_table, new_doc, target_language, preserve_format=True):
         """翻译表格内容"""
-        # 创建新表格
-        new_table = new_doc.add_table(rows=len(source_table.rows), cols=len(source_table.columns))
-        if preserve_format:
-            try:
-                new_table.style = source_table.style
-            except:
-                pass
+        try:
+            rows = len(source_table.rows)
+            cols = len(source_table.columns) if source_table.columns else len(source_table.rows[0].cells)
+            
+            new_table = new_doc.add_table(rows=rows, cols=cols)
+            new_table._element.append(parse_xml(r'<w:tblGrid xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>'))
+            
+            if preserve_format:
+                try:
+                    new_table.style = source_table.style
+                except:
+                    pass
 
-        # 复制并翻译单元格内容
-        for i, row in enumerate(source_table.rows):
-            for j, cell in enumerate(row.cells):
-                # 获取源单元格的文本
-                source_text = cell.text.strip()
-                if source_text:
-                    # 翻译文本
-                    translated_text = self.translator.translate_text(
-                        source_text,
-                        target_language
-                    )
-                    if translated_text:
-                        # 将翻译后的文本写入新表格对应的单元格
-                        new_table.cell(i, j).text = translated_text
+            # 使用位置标记收集表格文本
+            cell_contents = []
+            for i, row in enumerate(source_table.rows):
+                for j, cell in enumerate(row.cells):
+                    text = cell.text.strip()
+                    if text:
+                        # 存储文本及其位置信息
+                        cell_contents.append({
+                            'text': text,
+                            'row': i,
+                            'col': j,
+                            'marker': f"[CELL_{i}_{j}]"  # 添加唯一标记
+                        })
+
+            # 如果没有需要翻译的内容，直接返回
+            if not cell_contents:
+                return
+
+            # 构建带标记的文本
+            marked_text = "\n".join(f"{item['marker']}{item['text']}" for item in cell_contents)
+            
+            # 翻译带标记的文本
+            translated_text = self.translator.translate_text(marked_text, target_language)
+            
+            if translated_text:
+                # 解析翻译结果
+                translations = {}
+                current_text = ""
+                current_marker = None
+                
+                # 分行处理翻译结果
+                for line in translated_text.split('\n'):
+                    line = line.strip()
+                    if not line:
+                        continue
+                        
+                    # 检查是否找到标记
+                    marker_found = False
+                    for cell in cell_contents:
+                        if line.startswith(cell['marker']):
+                            # 如果有未处理的文本，保存它
+                            if current_marker:
+                                translations[current_marker] = current_text.strip()
+                            
+                            # 开始新的文本
+                            current_marker = cell['marker']
+                            current_text = line[len(current_marker):]
+                            marker_found = True
+                            break
+                    
+                    if not marker_found and current_marker:
+                        # 继续累积当前文本
+                        current_text += "\n" + line
+                
+                # 保存最后一个翻译
+                if current_marker:
+                    translations[current_marker] = current_text.strip()
+                
+                # 填充翻译后的表格
+                for cell in cell_contents:
+                    marker = cell['marker']
+                    if marker in translations:
+                        new_table.cell(cell['row'], cell['col']).text = translations[marker]
                     else:
-                        new_table.cell(i, j).text = source_text
+                        # 如果没有找到翻译，使用原文
+                        new_table.cell(cell['row'], cell['col']).text = cell['text']
                     self.processed_elements += 1
+                        
+        except Exception as e:
+            print(f"处理表格时出错: {str(e)}")
+            # 如果表格处理失败，添加错误信息
+            new_doc.add_paragraph("【表格处理失败，原始内容如下】")
+            for cell in cell_contents:
+                new_doc.add_paragraph(f"行{cell['row']+1}列{cell['col']+1}: {cell['text']}")
 
     def translate_text_frame(self, source_shape, new_doc, target_language):
         """翻译文本框内容"""
@@ -83,7 +236,7 @@ class DocumentProcessor:
                         # 添加一个分隔线表示这是文本框内容
                         new_doc.add_paragraph('─' * 50)
                         # 添加文本框标识
-                        new_doc.add_paragraph('【文本框内容】').bold = True
+                        new_doc.add_paragraph('【文本框容】').bold = True
                         # 添加翻译后的文本
                         new_para = new_doc.add_paragraph(translated_text)
                         # 添加结束分隔线
@@ -133,15 +286,33 @@ class DocumentProcessor:
 
 class DocTranslator:
     def __init__(self):
-        # 从环境变量获取 API key
-        api_key = os.getenv('X_AI_API_KEY')
-        if not api_key:
-            raise ValueError("未找到 API key，请在 .env 文件中设置 X_AI_API_KEY")
+        # 从环境变量获取所有 API keys
+        self.api_keys = []
+        self.current_key_index = 0
+        
+        # 获取所有配置的API keys
+        i = 1
+        while True:
+            key = os.getenv(f'X_AI_API_KEY_{i}')
+            if key:
+                self.api_keys.append(key)
+                i += 1
+            else:
+                break
+                
+        if not self.api_keys:
+            raise ValueError("未找到 API key，请在 .env 文件中设置 X_AI_API_KEY_1, X_AI_API_KEY_2 等")
             
-        self.client = OpenAI(
-            api_key=api_key,
-            base_url="https://api.x.ai/v1"
-        )
+        # 为每个 API key 创建一个客户端
+        self.clients = []
+        for key in self.api_keys:
+            client = OpenAI(
+                api_key=key,
+                base_url="https://api.x.ai/v1"
+            )
+            self.clients.append(client)
+        
+        self.current_key_index = 0  # 当前使用的API key索引
         
         # 支持的语言字典
         self.supported_languages = {
@@ -156,10 +327,18 @@ class DocTranslator:
             "Русский": "Russian",
             "Italiano": "Italian"
         }
+    
+    def get_next_client(self):
+        """获取下一个API客户端"""
+        self.current_key_index = (self.current_key_index + 1) % len(self.clients)
+        return self.current_key_index
         
     def translate_text(self, text, target_language):
         try:
-            # 根据目标语言调整提示词
+            # 使用当前客户端
+            client_index = self.current_key_index
+            
+            # 使用选定的客户端发送请求
             if target_language == "English":
                 prompt = f"Please translate the following text to English, maintaining professionalism and accuracy:\n\n{text}"
             elif target_language == "Japanese":
@@ -167,7 +346,7 @@ class DocTranslator:
             else:
                 prompt = f"请将以下文本翻译成{target_language}，保持专业性和准确性：\n\n{text}"
 
-            completion = self.client.chat.completions.create(
+            completion = self.clients[client_index].chat.completions.create(
                 model="grok-beta",
                 messages=[
                     {
@@ -182,8 +361,15 @@ class DocTranslator:
                 temperature=0.3
             )
             return completion.choices[0].message.content
+            
         except Exception as e:
             print(f"翻译出错: {str(e)}")
+            if "429" in str(e):
+                print(f"API Key {client_index + 1} 触发速率限制，切换到下一个 key...")
+                # 切换到下一个 API key
+                self.get_next_client()
+                # 递归重试，使用新的 key
+                return self.translate_text(text, target_language)
             return None
 
 class TranslatorGUI:
@@ -369,7 +555,7 @@ class TranslatorGUI:
         if messagebox.askyesno("确认", "确定要清理所有缓存文件吗？"):
             self.clean_cache()
             self.update_cache_status()
-            messagebox.showinfo("成功", "缓存已清理")
+            messagebox.showinfo("成功", "缓存已理")
 
     def get_unique_filename(self, base_path, target_language):
         """获取唯一的文件名"""
@@ -440,7 +626,7 @@ class TranslatorGUI:
                     
                 if last_index > 0:
                     response = messagebox.askyesno(
-                        "发现未完成的翻译",
+                        "发现未完成翻译",
                         f"发现上次翻译到第 {last_index} 个元素，是否继续上次的翻译？"
                     )
                     if response:
@@ -451,7 +637,7 @@ class TranslatorGUI:
             if new_doc is None:
                 new_doc = Document()
                 
-            # 翻译文档内容
+            # 翻译文档内
             try:
                 # 翻译段落
                 for i, para in enumerate(doc.paragraphs[last_index:], start=last_index):
@@ -504,7 +690,7 @@ class TranslatorGUI:
                 if text_frame_count > 0:
                     self.status_label.config(text=f"已翻译 {text_frame_count} 个文本框")
                 
-                # 翻译页眉页脚
+                # 翻译眉页脚
                 for section in doc.sections:
                     doc_processor.translate_section(
                         section,
@@ -599,7 +785,7 @@ class TranslatorGUI:
         self.window.mainloop()
 
     def clean_cache(self):
-        """��理所有缓存文件"""
+        """理所有缓存文件"""
         try:
             cache_dir = os.path.join(os.path.dirname(self.file_path), ".translation_cache")
             if os.path.exists(cache_dir):
