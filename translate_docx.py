@@ -137,6 +137,7 @@ class DocumentProcessor:
             rows = len(source_table.rows)
             cols = len(source_table.columns) if source_table.columns else len(source_table.rows[0].cells)
             
+            # 在当前位置添加表格
             new_table = new_doc.add_table(rows=rows, cols=cols)
             new_table._element.append(parse_xml(r'<w:tblGrid xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>'))
             
@@ -152,12 +153,11 @@ class DocumentProcessor:
                 for j, cell in enumerate(row.cells):
                     text = cell.text.strip()
                     if text:
-                        # 存储文本及其位置信息
                         cell_contents.append({
                             'text': text,
                             'row': i,
                             'col': j,
-                            'marker': f"[CELL_{i}_{j}]"  # 添加唯一标记
+                            'marker': f"[CELL_{i}_{j}]"
                         })
 
             # 如果没有需要翻译的内容，直接返回
@@ -213,7 +213,10 @@ class DocumentProcessor:
                         # 如果没有找到翻译，使用原文
                         new_table.cell(cell['row'], cell['col']).text = cell['text']
                     self.processed_elements += 1
-                        
+
+                # 添加一个空段落来分隔表格
+                new_doc.add_paragraph()
+                    
         except Exception as e:
             print(f"处理表格时出错: {str(e)}")
             # 如果表格处理失败，添加错误信息
@@ -555,7 +558,7 @@ class TranslatorGUI:
         if messagebox.askyesno("确认", "确定要清理所有缓存文件吗？"):
             self.clean_cache()
             self.update_cache_status()
-            messagebox.showinfo("成功", "缓存已理")
+            messagebox.showinfo("成功", "缓存已清理")
 
     def get_unique_filename(self, base_path, target_language):
         """获取唯一的文件名"""
@@ -627,7 +630,7 @@ class TranslatorGUI:
                 if last_index > 0:
                     response = messagebox.askyesno(
                         "发现未完成翻译",
-                        f"发现上次翻译到第 {last_index} 个元素，是否继续上次的翻译？"
+                        f"发现��次翻译到第 {last_index} 个元素，是否继续上次的翻译？"
                     )
                     if response:
                         new_doc = Document(cache_file)
@@ -637,43 +640,55 @@ class TranslatorGUI:
             if new_doc is None:
                 new_doc = Document()
                 
-            # 翻译文档内
+            # 翻译文档内容
             try:
-                # 翻译段落
-                for i, para in enumerate(doc.paragraphs[last_index:], start=last_index):
+                # 逐个处理文档元素
+                for element in doc.element.body:
                     while self.is_paused:
                         self.window.update()
                         time.sleep(0.1)
                         continue
-                        
-                    if para.text.strip():
-                        new_para = new_doc.add_paragraph()
-                        if self.preserve_format.get():
-                            try:
-                                new_para.style = para.style
-                            except:
-                                pass
-                        
-                        translated_text = self.translator.translate_text(para.text, target_language)
-                        if translated_text:
-                            new_para.text = translated_text
+                    
+                    if element.tag.endswith('p'):
+                        # 处理段落
+                        text = element.text.strip()
+                        if text:
+                            new_para = new_doc.add_paragraph()
+                            if self.preserve_format.get():
+                                try:
+                                    # 复制原始段落的样式
+                                    new_para._element = element
+                                except:
+                                    pass
+                            
+                            translated_text = self.translator.translate_text(text, target_language)
+                            if translated_text:
+                                new_para.text = translated_text
+                            else:
+                                new_para.text = text
+                            
+                            doc_processor.processed_elements += 1
                         else:
-                            new_para.text = para.text
-                        
-                        doc_processor.processed_elements += 1
-                    else:
-                        new_doc.add_paragraph()
+                            new_doc.add_paragraph()
                     
-                    self.update_progress(doc_processor.processed_elements, total_elements)
+                    elif element.tag.endswith('tbl'):
+                        # 处理表格
+                        try:
+                            # 创建临时文档并添加表格
+                            temp_doc = Document()
+                            temp_doc._body._element.append(element)
+                            source_table = temp_doc.tables[0]
+                            doc_processor.translate_table(
+                                source_table,
+                                new_doc,
+                                target_language,
+                                self.preserve_format.get()
+                            )
+                        except Exception as table_error:
+                            print(f"处理表格时出错: {str(table_error)}")
+                            new_doc.add_paragraph("【表格处理失败】")
+                            continue
                     
-                # 翻译表格
-                for table in doc.tables:
-                    doc_processor.translate_table(
-                        table, 
-                        new_doc, 
-                        target_language, 
-                        self.preserve_format.get()
-                    )
                     self.update_progress(doc_processor.processed_elements, total_elements)
                 
                 # 翻译文本框
@@ -699,7 +714,7 @@ class TranslatorGUI:
                     )
                     self.update_progress(doc_processor.processed_elements, total_elements)
                 
-                # 保存文档（使用新的文件名生成方法）
+                # 保存���档（使用新的文件名生成方法）
                 output_path = self.get_unique_filename(self.file_path, target_language)
                 new_doc.save(output_path)
                 
@@ -785,7 +800,7 @@ class TranslatorGUI:
         self.window.mainloop()
 
     def clean_cache(self):
-        """理所有缓存文件"""
+        """清理所有缓存文件"""
         try:
             cache_dir = os.path.join(os.path.dirname(self.file_path), ".translation_cache")
             if os.path.exists(cache_dir):
