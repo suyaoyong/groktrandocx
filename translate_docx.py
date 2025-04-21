@@ -308,7 +308,7 @@ class DocTranslator:
         for key in self.api_keys:
             client = OpenAI(
                 api_key=key,
-                base_url="https://api.x.ai/v1"
+                base_url="https://api.deepseek.com"
             )
             self.clients.append(client)
         
@@ -347,7 +347,7 @@ class DocTranslator:
                 prompt = f"请将以下文本翻译成{target_language}，保持专业性和准确性：\n\n{text}"
 
             completion = self.clients[client_index].chat.completions.create(
-                model="grok-beta",
+                model="deepseek-chat",
                 messages=[
                     {
                         "role": "system",
@@ -358,7 +358,7 @@ class DocTranslator:
                         "content": prompt
                     }
                 ],
-                temperature=0.3
+                temperature=1.3
             )
             return completion.choices[0].message.content
             
